@@ -1,3 +1,9 @@
+This is a >Go 1.18 generic version of [anishathalye/porcupine](https://github.com/anishathalye/porcupine).
+
+You can follow the example in https://github.com/tjungblu/porcupine/tree/main/_example to implement your own model easily.
+
+--- 
+
 # Porcupine [![Build Status](https://github.com/anishathalye/porcupine/workflows/CI/badge.svg)](https://github.com/anishathalye/porcupine/actions?query=workflow%3ACI) [![Go Reference](https://pkg.go.dev/badge/github.com/anishathalye/porcupine)](https://pkg.go.dev/github.com/anishathalye/porcupine)
 
 Porcupine is a fast linearizability checker for testing the correctness of
