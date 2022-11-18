@@ -2,17 +2,40 @@ package porcupine
 
 import "fmt"
 
+// State describes the state of the system at a given point in time.
+type State[S any] interface {
+	// Stringer implements String() which returns a state representation for visualization purposes.
+	// For example, "{'x' -> 'y', 'z' -> 'w'}".
+	fmt.Stringer
+
+	// Clone makes a deep copy of the given state, this is used to ensure every step
+	// operates on its own state to avoid mutation issues.
+	Clone() S
+	// Equals returns true when this state equals the other state.
+	Equals(otherState S) bool
+}
+
+type Input[I any] interface {
+}
+
+type Output[O any] interface {
+}
+
+type InputOutputUnion[I any, O any] interface {
+	Input[I] | Output[O]
+}
+
 // An Operation is an element of a history.
 //
 // This package supports two different representations of histories, as a
 // sequence of Operation or [Event]. In the Operation representation, function
 // call/returns are packaged together, along with timestamps of when the
 // function call was made and when the function call returned.
-type Operation struct {
+type Operation[I Input[I], O Output[O]] struct {
 	ClientId int // optional, unless you want a visualization; zero-indexed
-	Input    interface{}
+	Input    I
 	Call     int64 // invocation timestamp
-	Output   interface{}
+	Output   O
 	Return   int64 // response timestamp
 }
 
@@ -34,26 +57,22 @@ const (
 //
 // The Id field is used to match a function call event with its corresponding
 // return event.
-type Event struct {
+type Event[I Input[I], O Output[O]] struct {
 	ClientId int // optional, unless you want a visualization; zero-indexed
 	Kind     EventKind
-	Value    interface{}
+	Value    InputOutputUnion[I, O]
 	Id       int
 }
 
 // A Model is a sequential specification of a system.
 //
-// Note: models in this package are expected to be purely functional. That is,
-// the model Step function should not modify the given state (or input or
-// output), but return a new state.
-//
-// Only the Init, Step, and Equal functions are necessary to specify if you
+// Only the Init and Step functions are necessary to specify if you
 // just want to test histories for linearizability.
 //
 // Implementing the partition functions can greatly improve performance. If
 // you're implementing the partition function, the model Init and Step
 // functions can be per-partition. For example, if your specification is for a
-// key-value store and you partition by key, then the per-partition state
+// key-value store, and you partition by key, then the per-partition state
 // representation can just be a single value rather than a map.
 //
 // Implementing DescribeOperation and DescribeState will produce nicer
@@ -63,60 +82,40 @@ type Event struct {
 // to write models, including models that include partition functions.
 //
 // [test code]: https://github.com/anishathalye/porcupine/blob/master/porcupine_test.go
-type Model struct {
+type Model[S State[S], I any, O any] struct {
 	// Partition functions, such that a history is linearizable if and only
 	// if each partition is linearizable. If left nil, this package will
 	// skip partitioning.
-	Partition      func(history []Operation) [][]Operation
-	PartitionEvent func(history []Event) [][]Event
-	// Initial state of the system.
-	Init func() interface{}
-	// Step function for the system. Returns whether or not the system
+	Partition      func(history []Operation[I, O]) [][]Operation[I, O]
+	PartitionEvent func(history []Event[I, O]) [][]Event[I, O]
+	// Init returns the initial state of the system
+	Init func() S
+	// Step function for the system. Returns whether the system
 	// could take this step with the given inputs and outputs and also
-	// returns the new state. This function must be a pure function: it
-	// cannot mutate the given state.
-	Step func(state interface{}, input interface{}, output interface{}) (bool, interface{})
-	// Equality on states. If left nil, this package will use == as a
-	// fallback ([ShallowEqual]).
-	Equal func(state1, state2 interface{}) bool
+	// returns the new state. This function can mutate the state.
+	Step func(state S, input I, output O) (bool, S)
 	// For visualization, describe an operation as a string. For example,
 	// "Get('x') -> 'y'". Can be omitted if you're not producing
 	// visualizations.
-	DescribeOperation func(input interface{}, output interface{}) string
-	// For visualization purposes, describe a state as a string. For
-	// example, "{'x' -> 'y', 'z' -> 'w'}". Can be omitted if you're not
-	// producing visualizations.
-	DescribeState func(state interface{}) string
+	DescribeOperation func(input I, output O) string
 }
 
 // noPartition is a fallback partition function that partitions the history
 // into a single partition containing all of the operations.
-func noPartition(history []Operation) [][]Operation {
-	return [][]Operation{history}
+func noPartition[I any, O any](history []Operation[I, O]) [][]Operation[I, O] {
+	return [][]Operation[I, O]{history}
 }
 
 // noPartitionEvent is a fallback partition function that partitions the
 // history into a single partition containing all of the events.
-func noPartitionEvent(history []Event) [][]Event {
-	return [][]Event{history}
-}
-
-// shallowEqual is a fallback equality function that compares two states using
-// ==.
-func shallowEqual(state1, state2 interface{}) bool {
-	return state1 == state2
+func noPartitionEvent[I any, O any](history []Event[I, O]) [][]Event[I, O] {
+	return [][]Event[I, O]{history}
 }
 
 // defaultDescribeOperation is a fallback to convert an operation to a string.
 // It renders inputs and outputs using the "%v" format specifier.
-func defaultDescribeOperation(input interface{}, output interface{}) string {
+func defaultDescribeOperation[I any, O any](input I, output O) string {
 	return fmt.Sprintf("%v -> %v", input, output)
-}
-
-// defaultDescribeState is a fallback to convert a state to a string. It
-// renders the state using the "%v" format specifier.
-func defaultDescribeState(state interface{}) string {
-	return fmt.Sprintf("%v", state)
 }
 
 // A CheckResult is the result of a linearizability check.

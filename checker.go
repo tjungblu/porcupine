@@ -15,10 +15,18 @@ const (
 
 type entry struct {
 	kind     entryKind
-	value    interface{}
+	value    any
 	id       int
 	time     int64
 	clientId int
+}
+
+func entryValueAsInput[I any](e entry) I {
+	return e.value.(I)
+}
+
+func entryValueAsOutput[O any](e entry) O {
+	return e.value.(O)
 }
 
 type linearizationInfo struct {
@@ -45,7 +53,7 @@ func (a byTime) Less(i, j int) bool {
 	return a[i].kind == callEntry && a[j].kind == returnEntry
 }
 
-func makeEntries(history []Operation) []entry {
+func makeEntries[I any, O any](history []Operation[I, O]) []entry {
 	var entries []entry = nil
 	id := 0
 	for _, elem := range history {
@@ -60,11 +68,19 @@ func makeEntries(history []Operation) []entry {
 }
 
 type node struct {
-	value interface{}
+	value any
 	match *node // call if match is nil, otherwise return
 	id    int
 	next  *node
 	prev  *node
+}
+
+func nodeValueAsInput[I any](e *node) I {
+	return e.value.(I)
+}
+
+func nodeValueAsOutput[O any](e *node) O {
+	return e.value.(O)
 }
 
 func insertBefore(n *node, mark *node) *node {
@@ -89,15 +105,15 @@ func length(n *node) int {
 	return l
 }
 
-func renumber(events []Event) []Event {
-	var e []Event
+func renumber[I any, O any](events []Event[I, O]) []Event[I, O] {
+	var e []Event[I, O]
 	m := make(map[int]int) // renumbering
 	id := 0
 	for _, v := range events {
 		if r, ok := m[v.Id]; ok {
-			e = append(e, Event{v.ClientId, v.Kind, v.Value, r})
+			e = append(e, Event[I, O]{v.ClientId, v.Kind, v.Value, r})
 		} else {
-			e = append(e, Event{v.ClientId, v.Kind, v.Value, id})
+			e = append(e, Event[I, O]{v.ClientId, v.Kind, v.Value, id})
 			m[v.Id] = id
 			id++
 		}
@@ -105,7 +121,7 @@ func renumber(events []Event) []Event {
 	return e
 }
 
-func convertEntries(events []Event) []entry {
+func convertEntries[I any, O any](events []Event[I, O]) []entry {
 	var entries []entry
 	for i, elem := range events {
 		kind := callEntry
@@ -137,23 +153,23 @@ func makeLinkedEntries(entries []entry) *node {
 	return root
 }
 
-type cacheEntry struct {
+type cacheEntry[S State[S]] struct {
 	linearized bitset
-	state      interface{}
+	state      S
 }
 
-func cacheContains(model Model, cache map[uint64][]cacheEntry, entry cacheEntry) bool {
+func cacheContains[S State[S]](cache map[uint64][]cacheEntry[S], entry cacheEntry[S]) bool {
 	for _, elem := range cache[entry.linearized.hash()] {
-		if entry.linearized.equals(elem.linearized) && model.Equal(entry.state, elem.state) {
+		if entry.linearized.equals(elem.linearized) && entry.state.Equals(elem.state) {
 			return true
 		}
 	}
 	return false
 }
 
-type callsEntry struct {
+type callsEntry[S State[S]] struct {
 	entry *node
-	state interface{}
+	state S
 }
 
 func lift(entry *node) {
@@ -176,12 +192,12 @@ func unlift(entry *node) {
 	entry.next.prev = entry
 }
 
-func checkSingle(model Model, history []entry, computePartial bool, kill *int32) (bool, []*[]int) {
+func checkSingle[S State[S], I any, O any](model Model[S, I, O], history []entry, computePartial bool, kill *int32) (bool, []*[]int) {
 	entry := makeLinkedEntries(history)
 	n := length(entry) / 2
 	linearized := newBitset(uint(n))
-	cache := make(map[uint64][]cacheEntry) // map from hash to cache entry
-	var calls []callsEntry
+	cache := make(map[uint64][]cacheEntry[S]) // map from hash to cache entry
+	var calls []callsEntry[S]
 	// longest linearizable prefix that includes the given entry
 	longest := make([]*[]int, n)
 
@@ -193,14 +209,14 @@ func checkSingle(model Model, history []entry, computePartial bool, kill *int32)
 		}
 		if entry.match != nil {
 			matching := entry.match // the return entry
-			ok, newState := model.Step(state, entry.value, matching.value)
+			ok, newState := model.Step(state.Clone(), nodeValueAsInput[I](entry), nodeValueAsOutput[O](matching))
 			if ok {
 				newLinearized := linearized.clone().set(uint(entry.id))
-				newCacheEntry := cacheEntry{newLinearized, newState}
-				if !cacheContains(model, cache, newCacheEntry) {
+				newCacheEntry := cacheEntry[S]{newLinearized, newState}
+				if !cacheContains(cache, newCacheEntry) {
 					hash := newLinearized.hash()
 					cache[hash] = append(cache[hash], newCacheEntry)
-					calls = append(calls, callsEntry{entry, state})
+					calls = append(calls, callsEntry[S]{entry, state})
 					state = newState
 					linearized.set(uint(entry.id))
 					lift(entry)
@@ -252,26 +268,20 @@ func checkSingle(model Model, history []entry, computePartial bool, kill *int32)
 	return true, longest
 }
 
-func fillDefault(model Model) Model {
+func fillDefault[S State[S], I any, O any](model Model[S, I, O]) Model[S, I, O] {
 	if model.Partition == nil {
-		model.Partition = noPartition
+		model.Partition = noPartition[I, O]
 	}
 	if model.PartitionEvent == nil {
-		model.PartitionEvent = noPartitionEvent
-	}
-	if model.Equal == nil {
-		model.Equal = shallowEqual
+		model.PartitionEvent = noPartitionEvent[I, O]
 	}
 	if model.DescribeOperation == nil {
-		model.DescribeOperation = defaultDescribeOperation
-	}
-	if model.DescribeState == nil {
-		model.DescribeState = defaultDescribeState
+		model.DescribeOperation = defaultDescribeOperation[I, O]
 	}
 	return model
 }
 
-func checkParallel(model Model, history [][]entry, computeInfo bool, timeout time.Duration) (CheckResult, linearizationInfo) {
+func checkParallel[S State[S], I any, O any](model Model[S, I, O], history [][]entry, computeInfo bool, timeout time.Duration) (CheckResult, linearizationInfo) {
 	ok := true
 	timedOut := false
 	results := make(chan bool, len(history))
@@ -350,7 +360,7 @@ loop:
 	return result, info
 }
 
-func checkEvents(model Model, history []Event, verbose bool, timeout time.Duration) (CheckResult, linearizationInfo) {
+func checkEvents[S State[S], I any, O any](model Model[S, I, O], history []Event[I, O], verbose bool, timeout time.Duration) (CheckResult, linearizationInfo) {
 	model = fillDefault(model)
 	partitions := model.PartitionEvent(history)
 	l := make([][]entry, len(partitions))
@@ -360,7 +370,7 @@ func checkEvents(model Model, history []Event, verbose bool, timeout time.Durati
 	return checkParallel(model, l, verbose, timeout)
 }
 
-func checkOperations(model Model, history []Operation, verbose bool, timeout time.Duration) (CheckResult, linearizationInfo) {
+func checkOperations[S State[S], I any, O any](model Model[S, I, O], history []Operation[I, O], verbose bool, timeout time.Duration) (CheckResult, linearizationInfo) {
 	model = fillDefault(model)
 	partitions := model.Partition(history)
 	l := make([][]entry, len(partitions))
